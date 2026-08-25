@@ -320,19 +320,49 @@ class WhChip(TTChip):
         return get_bundle_version_v1(self)
 
 
+def _board_type_from_id(board_id: Optional[int]) -> Optional[str]:
+    if not board_id:
+        return None
+    try:
+        return get_board_type(board_id)
+    except Exception:
+        return None
+
+
+def _board_id_from_spi(dev: Union[WhChip, BhChip]) -> Optional[int]:
+    """
+    Board id programmed into Blackhole SPI `boardcfg`, if it can be read.
+
+    Recovery firmware (and some other states) publish 0 or an unrecognized
+    id over telemetry; the flash still holds the factory boardcfg protobuf.
+    Wormhole has no boardcfg table, so this is a no-op there.
+    """
+    decode = getattr(getattr(dev, "luwen_chip", None), "decode_boot_fs_table", None)
+    if decode is None:
+        return None
+    try:
+        return int(decode("boardcfg")["board_id"])
+    except Exception:
+        return None
+
+
 def resolve_board_type(dev: Union[WhChip, BhChip]) -> Optional[str]:
     """
     Board type of a chip, or None if nothing on the chip identifies it.
 
     A chip running recovery firmware publishes no board id: board_id() either
-    raises or reads back as 0, which get_board_type does not recognize. Ask the
-    PCI device in that case. Its subsystem id carries the same UPI and does not
-    depend on what the chip is running.
+    raises or reads back as 0, which get_board_type does not recognize. Try
+    the SPI boardcfg table next (Blackhole), then the PCI subsystem id. The
+    subsystem id carries the same UPI and does not depend on what the chip
+    is running.
     """
     try:
-        board_type = get_board_type(dev.board_id())
+        board_type = _board_type_from_id(dev.board_id())
     except Exception:
         board_type = None
+
+    if board_type is None:
+        board_type = _board_type_from_id(_board_id_from_spi(dev))
 
     if board_type is None:
         try:

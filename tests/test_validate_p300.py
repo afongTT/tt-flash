@@ -14,12 +14,26 @@ from typing import Optional
 
 import pytest
 
-from tt_flash.chip import validate_p300_can_be_flashed
+from tt_flash.chip import resolve_board_type, validate_p300_can_be_flashed
 
 
 def make_board_id(upi: int = 0x45, serial: int = 0x1) -> int:
     """Build a board_id with a given UPI and rest of serial number."""
     return (upi << 36) | serial
+
+
+@dataclass
+class _FakeLuwenChip:
+    def __init__(self, boardcfg: Optional[dict] = None, fail: bool = False):
+        self._boardcfg = boardcfg
+        self._fail = fail
+
+    def decode_boot_fs_table(self, tag_name: str) -> dict:
+        if self._fail:
+            raise RuntimeError("spi read failed")
+        if tag_name != "boardcfg" or self._boardcfg is None:
+            raise KeyError(tag_name)
+        return self._boardcfg
 
 
 @dataclass
@@ -30,6 +44,7 @@ class FakeTTChip:
     # UPI as it appears in the PCI subsystem id. A chip running recovery FW has
     # a board_id of 0 and can only be identified through this.
     _pci_board_type: Optional[int] = None
+    luwen_chip: Optional[_FakeLuwenChip] = None
 
     def board_id(self) -> int:
         return self._board_id
@@ -273,3 +288,43 @@ class TestValidateP300:
 
             assert incomplete, f"UPI {upi:#x} should be recognized as P300"
             assert len(valid) == 0
+
+
+class TestResolveBoardType:
+    def test_telemetry_board_id(self):
+        chip = FakeTTChip(make_board_id(upi=0x40), 0)
+
+        assert resolve_board_type(chip) == "P150A-1"
+
+    def test_spi_boardcfg_when_telemetry_is_zero(self):
+        chip = FakeTTChip(
+            0x0,
+            0,
+            luwen_chip=_FakeLuwenChip({"board_id": make_board_id(upi=0x40)}),
+        )
+
+        assert resolve_board_type(chip) == "P150A-1"
+
+    def test_spi_boardcfg_when_telemetry_upi_unknown(self):
+        chip = FakeTTChip(
+            make_board_id(upi=0xDEAD),
+            0,
+            luwen_chip=_FakeLuwenChip({"board_id": make_board_id(upi=0x43)}),
+        )
+
+        assert resolve_board_type(chip) == "P100A-1"
+
+    def test_pci_fallback_when_spi_unreadable(self):
+        chip = FakeTTChip(
+            0x0,
+            0,
+            _pci_board_type=0x45,
+            luwen_chip=_FakeLuwenChip(fail=True),
+        )
+
+        assert resolve_board_type(chip) == "P300A-1"
+
+    def test_none_when_every_source_fails(self):
+        chip = FakeTTChip(0x0, 0, luwen_chip=_FakeLuwenChip(fail=True))
+
+        assert resolve_board_type(chip) is None
